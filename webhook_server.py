@@ -2,14 +2,17 @@
 from flask import Flask, request, abort
 import stripe
 import asyncio
-from vending import load_data, save_data, send_log  # 必要なら調整
+import os
+from vending import load_data, save_data, send_log
 
 app = Flask(__name__)
 
-# ←←←← ここに Stripe Dashboard からコピーしたシークレット貼り付け
-STRIPE_WEBHOOK_SECRET = "whsec_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+# 環境変数から取得
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+if not STRIPE_WEBHOOK_SECRET:
+    raise RuntimeError("STRIPE_WEBHOOK_SECRET is not set!")
 
-bot = None  # Render 起動時に bot を渡す（後で）
+bot = None
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -17,10 +20,10 @@ def webhook():
     sig = request.headers.get("Stripe-Signature")
     try:
         event = stripe.Webhook.construct_event(payload, sig, STRIPE_WEBHOOK_SECRET)
-    except:
+    except Exception as e:
+        print(f"Webhook error: {e}")
         return abort(400)
 
-    # 決済完了イベントだけ処理
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         order_key = session.metadata.get("order_key")
@@ -36,20 +39,18 @@ def webhook():
         order["transaction_id"] = session.id
         save_data(data)
 
-        # DM 通知（bot が必要）
         if bot:
             user = asyncio.run(bot.fetch_user(int(order["user_id"])))
-            asyncio.run(user.send(f"決済確認！処理中…"))
+            asyncio.run(user.send("決済確認！処理中…"))
 
-        # SMM API 送信（vending.py から関数呼び出し）
-        from stripe_integration import send_to_smm  # 必要に応じて
+        from stripe_integration import send_to_smm
         success = asyncio.run(send_to_smm(order))
 
         if success:
             order["status"] = "completed"
             save_data(data)
             if bot:
-                asyncio.run(user.send(f"完了！反映されました！"))
+                asyncio.run(user.send("完了！反映されました！"))
                 asyncio.run(send_log(bot, order_key, "achievements"))
                 asyncio.run(send_log(bot, order_key, "sales"))
         else:
@@ -63,4 +64,5 @@ def webhook():
 def run_server(discord_bot):
     global bot
     bot = discord_bot
-    app.run(host="0.0.0.0", port=10000)  # Render はポート 10000 を使う
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
